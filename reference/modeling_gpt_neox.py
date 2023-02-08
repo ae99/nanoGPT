@@ -101,7 +101,7 @@ class GPTNeoXAttention(nn.Module):
     def forward(
         self,
         hidden_states,
-        attention_mask,
+        attention_mask=None,
         head_mask=None,
         layer_past=None,
         use_cache=False,
@@ -113,16 +113,21 @@ class GPTNeoXAttention(nn.Module):
         # Attention heads [batch, seq_len, hidden_size]
         #   --> [batch, seq_len, (np * 3 * head_size)]
         qkv = self.query_key_value(hidden_states)
-
+        # print(qkv.size(), qkv[2][5][1])  #SAME
         # [batch, seq_len, (num_heads * 3 * head_size)]
         #   --> [batch, seq_len, num_heads, 3 * head_size]
+        # print(qkv)
         new_qkv_shape = qkv.size()[:-1] + (self.num_attention_heads, 3 * self.head_size)
+        # print(new_qkv_shape)
         qkv = qkv.view(*new_qkv_shape)
-
         # [batch, seq_len, num_attention_heads, 3 * head_size] --> 3 [batch, num_attention_heads, seq_len, head_size]
         query = qkv[..., : self.head_size].permute(0, 2, 1, 3)
         key = qkv[..., self.head_size : 2 * self.head_size].permute(0, 2, 1, 3)
         value = qkv[..., 2 * self.head_size :].permute(0, 2, 1, 3)
+        # print(qkv[..., self.head_size : 2 * self.head_size])
+
+        # print(query.shape, key.shape, value.shape)
+        # print(query[0][0][0][1], key[0][0][0][1], value[0][0][0][1])
 
         # Compute rotary embeddings on rotary_ndims
         query_rot = query[..., : self.rotary_ndims]
@@ -133,27 +138,35 @@ class GPTNeoXAttention(nn.Module):
         # Compute token offset for rotary embeddings (when decoding)
         seq_len = key.shape[-2]
         offset = 0
-        if has_layer_past:
-            offset = layer_past[0].shape[-2]
-            seq_len += offset
+        # if has_layer_past:
+        #     offset = layer_past[0].shape[-2]
+        #     seq_len += offset
         cos, sin = self.rotary_emb(value, seq_len=seq_len)
-        query, key = apply_rotary_pos_emb(query_rot, key_rot, cos, sin, offset=offset)
-        query = torch.cat((query, query_pass), dim=-1)
-        key = torch.cat((key, key_pass), dim=-1)
+        # print(query.size(), key.size(), value.size())
+        # query, key = apply_rotary_pos_emb(query_rot, key_rot, cos, sin, offset=offset)
+        # print(query.size(), key.size(), value.size())
+        # query = torch.cat((query, query_pass), dim=-1) # TODO: THIS is the problem, why do we do this?
+        # key = torch.cat((key, key_pass), dim=-1)
+        # print(query.size(), key.size(), value.size())
 
         # Cache QKV values
-        if has_layer_past:
-            past_key = layer_past[0]
-            past_value = layer_past[1]
-            key = torch.cat((past_key, key), dim=-2)
-            value = torch.cat((past_value, value), dim=-2)
-        present = (key, value) if use_cache else None
+        # if has_layer_past:
+        #     past_key = layer_past[0]
+        #     past_value = layer_past[1]
+        #     key = torch.cat((past_key, key), dim=-2)
+        #     value = torch.cat((past_value, value), dim=-2)
+        present = None # (key, value) if use_cache else None
 
         # Compute attention
+        # print(query.size(), key.size(), value.size())
+        # print(query[0][0][0][0], key[0][0][0][0], value[0][0][0][0])
         attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask)
 
         # Reshape outputs
         attn_output = self._merge_heads(attn_output, self.num_attention_heads, self.head_size)
+        # print(attn_output[0][0][0])
+        # print(attn_output.shape)
+
         attn_output = self.dense(attn_output)
 
         outputs = (attn_output, present)
@@ -195,8 +208,11 @@ class GPTNeoXAttention(nn.Module):
 
         causal_mask = self.bias[:, :, key_length - query_length : key_length, :key_length].bool()
 
-        query = query.view(batch_size * num_attention_heads, query_length, attn_head_size)
-        key = key.view(batch_size * num_attention_heads, key_length, attn_head_size)
+        query = query.reshape(batch_size * num_attention_heads, query_length, attn_head_size) # TODO: changed view -> reshape
+        key = key.reshape(batch_size * num_attention_heads, key_length, attn_head_size) # TODO: changed view -> reshape
+        
+        # print(query.shape, key.shape, value.shape)
+        
         attn_scores = torch.zeros(
             batch_size * num_attention_heads,
             query_length,

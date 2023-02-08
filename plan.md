@@ -85,3 +85,9 @@ GPT:
 GPTJ
 (ln_f): LayerNorm((32,), eps=1e-05, elementwise_affine=True)
 (lm_head): Linear(in_features=32, out_features=1000, bias=True)
+
+
+
+
+
+
