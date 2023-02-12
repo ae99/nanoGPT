@@ -129,6 +129,7 @@ class GPTNeoXAttention(nn.Module):
         # print(query.shape, key.shape, value.shape)
         # print(query[0][0][0][1], key[0][0][0][1], value[0][0][0][1])
 
+        # <ROTARY>
         # Compute rotary embeddings on rotary_ndims
         query_rot = query[..., : self.rotary_ndims]
         query_pass = query[..., self.rotary_ndims :]
@@ -142,13 +143,14 @@ class GPTNeoXAttention(nn.Module):
         #     offset = layer_past[0].shape[-2]
         #     seq_len += offset
         cos, sin = self.rotary_emb(value, seq_len=seq_len)
-        # print(query.size(), key.size(), value.size())
-        # query, key = apply_rotary_pos_emb(query_rot, key_rot, cos, sin, offset=offset)
-        # print(query.size(), key.size(), value.size())
-        # query = torch.cat((query, query_pass), dim=-1) # TODO: THIS is the problem, why do we do this?
-        # key = torch.cat((key, key_pass), dim=-1)
-        # print(query.size(), key.size(), value.size())
 
+        query, key = apply_rotary_pos_emb(query_rot, key_rot, cos, sin, offset=offset)
+
+        query = torch.cat((query, query_pass), dim=-1)
+        key = torch.cat((key, key_pass), dim=-1)
+
+        # </ROTARY>
+        
         # Cache QKV values
         # if has_layer_past:
         #     past_key = layer_past[0]
