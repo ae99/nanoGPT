@@ -60,7 +60,7 @@ class RotaryEmbedding(torch.nn.Module):
 
     def forward(self, t, seq_len=None, offset: int = 0):
         assert seq_len <= self.max_seq_len_cached
-        sin, cos = self.cos_cached[:seq_len, ...], self.sin_cached[:seq_len, ...]
+        cos, sin = self.cos_cached[:seq_len, ...], self.sin_cached[:seq_len, ...]
         
         # split into (B, nh, T, 0.25hs), (B, nh, T, 0.75hs)
         t_rot, t_pass = t[..., : self.rotary_ndims], t[..., self.rotary_ndims :]
