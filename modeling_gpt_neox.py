@@ -91,6 +91,7 @@ class GPTNeoXAttention(nn.Module):
             ),
         )
         self.register_buffer("masked_bias", torch.tensor(-1e9))
+        print(self.rotary_ndims, config.max_position_embeddings, config.rotary_emb_base)
         self.rotary_emb = RotaryEmbedding(
             self.rotary_ndims, config.max_position_embeddings, base=config.rotary_emb_base
         )
@@ -125,6 +126,7 @@ class GPTNeoXAttention(nn.Module):
         key = qkv[..., self.head_size : 2 * self.head_size].permute(0, 2, 1, 3)
         value = qkv[..., 2 * self.head_size :].permute(0, 2, 1, 3)
         # print(qkv[..., self.head_size : 2 * self.head_size])
+
 
         # print(query.shape, key.shape, value.shape)
         # print(query[0][0][0][1], key[0][0][0][1], value[0][0][0][1])
@@ -210,8 +212,8 @@ class GPTNeoXAttention(nn.Module):
 
         causal_mask = self.bias[:, :, key_length - query_length : key_length, :key_length].bool()
 
-        query = query.reshape(batch_size * num_attention_heads, query_length, attn_head_size) # TODO: changed view -> reshape
-        key = key.reshape(batch_size * num_attention_heads, key_length, attn_head_size) # TODO: changed view -> reshape
+        query = query.view(batch_size * num_attention_heads, query_length, attn_head_size) # TODO: changed view -> reshape
+        key = key.view(batch_size * num_attention_heads, key_length, attn_head_size) # TODO: changed view -> reshape
         
         # print(query.shape, key.shape, value.shape)
         
@@ -261,6 +263,7 @@ class RotaryEmbedding(torch.nn.Module):
     def __init__(self, dim, max_position_embeddings, base=10000, device=None):
         super().__init__()
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float().to(device) / dim))
+        print(inv_freq)
         self.register_buffer("inv_freq", inv_freq)
 
         # Build here to make `torch.jit.trace` work.

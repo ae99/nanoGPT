@@ -16,23 +16,65 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 # @torch.jit.script # good to enable when not using torch.compile, disable when using (our default)
-def new_gelu(x):
-    """
-    Implementation of the GELU activation function currently in Google BERT repo (identical to OpenAI GPT).
-    Reference: Gaussian Error Linear Units (GELU) paper: https://arxiv.org/abs/1606.08415
-    """
-    return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
+# def new_gelu(x):
+#     """
+#     Implementation of the GELU activation function currently in Google BERT repo (identical to OpenAI GPT).
+#     Reference: Gaussian Error Linear Units (GELU) paper: https://arxiv.org/abs/1606.08415
+#     """
+#     return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
 
-class LayerNorm(nn.Module):
-    """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
+# class LayerNorm(nn.Module):
+#     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
-    def __init__(self, ndim, bias):
+#     def __init__(self, ndim, bias):
+#         super().__init__()
+#         self.weight = nn.Parameter(torch.ones(ndim))
+#         self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
+
+#     def forward(self, input):
+#         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
+
+
+
+class RotaryEmbedding(torch.nn.Module):
+    def __init__(self, dim, max_position_embeddings, base=10000, device=None):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(ndim))
-        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
+        self.rotary_ndims = dim
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float().to(device) / dim))
+        self.register_buffer("inv_freq", inv_freq)
 
-    def forward(self, input):
-        return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
+        # Build here to make `torch.jit.trace` work.
+        self.max_seq_len_cached = max_position_embeddings
+        t = torch.arange(self.max_seq_len_cached, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        # Different from paper, but it uses a different permutation in order to obtain the same calculation
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.cos_cached = emb.cos()[None, None, :, :]
+        self.sin_cached = emb.sin()[None, None, :, :]
+
+    def rotate_half(self, x):
+        """Rotates half the hidden dims of the input."""
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return torch.cat((-x2, x1), dim=-1)
+
+    def forward(self, t, seq_len=None, offset: int = 0):
+        assert seq_len <= self.max_seq_len_cached
+        sin, cos = self.cos_cached[:seq_len, ...], self.sin_cached[:seq_len, ...]
+        
+        # split into (B, nh, T, 0.25hs), (B, nh, T, 0.75hs)
+        t_rot, t_pass = t[..., : self.rotary_ndims], t[..., self.rotary_ndims :]
+    
+        cos = cos[..., offset : t_rot.shape[-2] + offset, :]
+        sin = sin[..., offset : t_rot.shape[-2] + offset, :]
+
+        t_embed = (t_rot * cos) + (self.rotate_half(t_rot) * sin)
+
+        # merge
+        t_embed = torch.cat((t_embed, t_pass), dim=-1)
+
+        return t_embed
+
 
 class CausalSelfAttention(nn.Module):
 
@@ -49,6 +91,12 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
+        
+        self.rotary_emb = RotaryEmbedding(
+            int((config.n_embd // config.n_head) * config.rotary_pct),
+            config.block_size,
+        )
+
         # flash attention make GPU go brrrrr but support is only in PyTorch nightly and still a bit scary
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention') and self.dropout == 0.0
         if not self.flash:
@@ -59,12 +107,19 @@ class CausalSelfAttention(nn.Module):
 
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
-
+        head_size = C // self.n_head
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k ,v  = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        qkv = self.c_attn(x)
+        qkv = qkv.view(B, T, self.n_head, 3 * head_size)
+        q, k, v = qkv.split(head_size, dim=3)
+
+        k = k.view(B, T, self.n_head, head_size).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, head_size).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, head_size).transpose(1, 2) # (B, nh, T, hs)
+        
+        # TODO: Alex, set offset stuff, something to do with decoding?
+        q = self.rotary_emb(q, seq_len=T, offset=0)
+        k = self.rotary_emb(k, seq_len=T, offset=0)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
@@ -93,7 +148,7 @@ class MLP(nn.Module):
 
     def forward(self, x):
         x = self.c_fc(x)
-        x = new_gelu(x)
+        x = F.gelu(x)
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
@@ -102,14 +157,15 @@ class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_eps)
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_2 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_eps)
         self.mlp = MLP(config)
 
     def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        # Parallelize attention and MLP layers
+        # x = x + attn(ln1(x)) + mlp(ln2(x))
+        x = self.attn(self.ln_1(x)) + self.mlp(self.ln_2(x)) + x
         return x
 
 @dataclass
@@ -125,6 +181,7 @@ class GPTConfig:
     n_embd_proj: int = 768 * 4 # intermediate dimensionality
     rotary_pct: int = 0.25 
     use_parallel_residual: bool = True
+    layer_norm_eps = 1e-5
     
     
 
@@ -141,14 +198,16 @@ class GPT(nn.Module):
             # wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f = nn.LayerNorm(config.n_embd, eps=config.layer_norm_eps),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+       
+        # TODO ALEX REMOVE
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
         # not 100% sure what this is, so far seems to be harmless. TODO investigate
-        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+        # self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
 
         # init all weights
         self.apply(self._init_weights)
@@ -188,8 +247,8 @@ class GPT(nn.Module):
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (1, t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
+
+        x = self.transformer.drop(tok_emb)
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
@@ -284,7 +343,7 @@ class GPT(nn.Module):
         decay = set()
         no_decay = set()
         whitelist_weight_modules = (torch.nn.Linear, )
-        blacklist_weight_modules = (torch.nn.LayerNorm, LayerNorm, torch.nn.Embedding)
+        blacklist_weight_modules = (torch.nn.LayerNorm, torch.nn.Embedding)
         for mn, m in self.named_modules():
             for pn, p in m.named_parameters():
                 fpn = '%s.%s' % (mn, pn) if mn else pn # full param name
