@@ -1,10 +1,10 @@
 """
-Full definition of a GPT Language Model, all of it in this single file.
+Full definition of a GPTNeoX Language Model, all of it in this single file.
 References:
 1) the official GPT-2 TensorFlow implementation released by OpenAI:
 https://github.com/openai/gpt-2/blob/master/src/model.py
 2) huggingface/transformers PyTorch implementation:
-https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
+https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt_neox/modeling_gpt_neox.py
 """
 
 import math
@@ -14,27 +14,6 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-
-# @torch.jit.script # good to enable when not using torch.compile, disable when using (our default)
-# def new_gelu(x):
-#     """
-#     Implementation of the GELU activation function currently in Google BERT repo (identical to OpenAI GPT).
-#     Reference: Gaussian Error Linear Units (GELU) paper: https://arxiv.org/abs/1606.08415
-#     """
-#     return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
-
-# class LayerNorm(nn.Module):
-#     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
-
-#     def __init__(self, ndim, bias):
-#         super().__init__()
-#         self.weight = nn.Parameter(torch.ones(ndim))
-#         self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
-
-#     def forward(self, input):
-#         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
-
-
 
 class RotaryEmbedding(torch.nn.Module):
     def __init__(self, dim, max_position_embeddings, base=10000, device=None):
@@ -58,15 +37,15 @@ class RotaryEmbedding(torch.nn.Module):
         x2 = x[..., x.shape[-1] // 2 :]
         return torch.cat((-x2, x1), dim=-1)
 
-    def forward(self, t, seq_len=None, offset: int = 0):
+    def forward(self, t, seq_len=None):
         assert seq_len <= self.max_seq_len_cached
         cos, sin = self.cos_cached[:seq_len, ...], self.sin_cached[:seq_len, ...]
         
         # split into (B, nh, T, 0.25hs), (B, nh, T, 0.75hs)
         t_rot, t_pass = t[..., : self.rotary_ndims], t[..., self.rotary_ndims :]
     
-        cos = cos[..., offset : t_rot.shape[-2] + offset, :]
-        sin = sin[..., offset : t_rot.shape[-2] + offset, :]
+        cos = cos[..., 0 : t_rot.shape[-2], :]
+        sin = sin[..., 0 : t_rot.shape[-2], :]
 
         t_embed = (t_rot * cos) + (self.rotate_half(t_rot) * sin)
 
@@ -117,9 +96,8 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, head_size).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, head_size).transpose(1, 2) # (B, nh, T, hs)
         
-        # TODO: Alex, set offset stuff, something to do with decoding?
-        q = self.rotary_emb(q, seq_len=T, offset=0)
-        k = self.rotary_emb(k, seq_len=T, offset=0)
+        q = self.rotary_emb(q, seq_len=T)
+        k = self.rotary_emb(k, seq_len=T)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
@@ -202,13 +180,6 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
        
-        # TODO ALEX REMOVE
-        # with weight tying when using torch.compile() some warnings get generated:
-        # "UserWarning: functional_call was passed multiple values for tied weights.
-        # This behavior is deprecated and will be an error in future versions"
-        # not 100% sure what this is, so far seems to be harmless. TODO investigate
-        # self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
-
         # init all weights
         self.apply(self._init_weights)
         # apply special scaled init to the residual projections, per GPT-2 paper
@@ -276,58 +247,72 @@ class GPT(nn.Module):
 
     @classmethod
     def from_pretrained(cls, model_type, override_args=None):
-        assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
         override_args = override_args or {} # default to empty dict
-        # only dropout can be overridden see more notes below
-        assert all(k == 'dropout' for k in override_args)
-        from transformers import GPT2LMHeadModel
-        print("loading weights from pretrained gpt: %s" % model_type)
 
-        # n_layer, n_head and n_embd are determined from model_type
-        config_args = {
-            'gpt2':         dict(n_layer=12, n_head=12, n_embd=768),  # 124M params
-            'gpt2-medium':  dict(n_layer=24, n_head=16, n_embd=1024), # 350M params
-            'gpt2-large':   dict(n_layer=36, n_head=20, n_embd=1280), # 774M params
-            'gpt2-xl':      dict(n_layer=48, n_head=25, n_embd=1600), # 1558M params
-        }[model_type]
-        print("forcing vocab_size=50257, block_size=1024, bias=True")
-        config_args['vocab_size'] = 50257 # always 50257 for GPT model checkpoints
-        config_args['block_size'] = 1024 # always 1024 for GPT model checkpoints
-        config_args['bias'] = True # always True for GPT model checkpoints
-        # we can override the dropout rate, if desired
-        if 'dropout' in override_args:
-            print(f"overriding dropout rate to {override_args['dropout']}")
-            config_args['dropout'] = override_args['dropout']
+        # only dropout can be overridden see more notes below
+        from transformers import GPTNeoXForCausalLM
+        print("loading weights from pretrained GPTNeoX: %s" % model_type)
+        # init a huggingface/transformers model
+        model_hf = GPTNeoXForCausalLM.from_pretrained("EleutherAI/pythia-70m")
+        
+        gpt_neox_config = model_hf.config
+        
+        config = GPTConfig(
+            n_embd = gpt_neox_config.hidden_size,
+            n_head = gpt_neox_config.num_attention_heads,
+            n_layer = gpt_neox_config.num_hidden_layers,
+            vocab_size = gpt_neox_config.vocab_size,
+            block_size = gpt_neox_config.max_position_embeddings,
+            bias = True,
+            dropout= 0.0,
+            
+            n_embd_proj = gpt_neox_config.intermediate_size,
+            rotary_pct = gpt_neox_config.rotary_pct,
+        )
+
         # create a from-scratch initialized minGPT model
-        config = GPTConfig(**config_args)
         model = GPT(config)
         sd = model.state_dict()
+        
         sd_keys = sd.keys()
         sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] # discard this mask / buffer, not a param
+        sd_keys = [k for k in sd_keys if not k.endswith('.attn.rotary_emb.cos_cached')] # discard this mask / buffer, not a param
+        sd_keys = [k for k in sd_keys if not k.endswith('.attn.rotary_emb.sin_cached')] # discard this mask / buffer, not a param
 
-        # init a huggingface/transformers model
-        model_hf = GPT2LMHeadModel.from_pretrained(model_type)
         sd_hf = model_hf.state_dict()
 
         # copy while ensuring all of the parameters are aligned and match in names and shapes
         sd_keys_hf = sd_hf.keys()
-        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.masked_bias')] # ignore these, just a buffer
-        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.bias')] # same, just the mask (buffer)
-        transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
-        # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
-        # this means that we have to transpose these weights when we import them
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attention.masked_bias')] # ignore these, just a buffer
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attention.bias')] # same, just the mask (buffer)
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.rotary_emb.inv_freq')] # same, just the mask (buffer)
+
+        def rename_key(k):
+            k = k.replace('gpt_neox.layers', 'transformer.h')
+            # Attention
+            k = k.replace('.attention.dense.', '.attn.c_proj.')
+            k = k.replace('.attention.query_key_value.', '.attn.c_attn.')
+            # MLP
+            k = k.replace('.mlp.dense_h_to_4h.', '.mlp.c_fc.')
+            k = k.replace('.mlp.dense_4h_to_h.', '.mlp.c_proj.')
+            # LayerNorm
+            k = k.replace('.input_layernorm.', '.ln_1.')
+            k = k.replace('.post_attention_layernorm.', '.ln_2.')
+            # Embedding
+            k = k.replace('gpt_neox.embed_in.', 'transformer.wte.')
+            k = k.replace('gpt_neox.final_layer_norm.', 'transformer.ln_f.')
+            k = k.replace('embed_out.', 'lm_head.')
+            return k
+
         assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
+        
         for k in sd_keys_hf:
-            if any(k.endswith(w) for w in transposed):
-                # special treatment for the Conv1D weights we need to transpose
-                assert sd_hf[k].shape[::-1] == sd[k].shape
-                with torch.no_grad():
-                    sd[k].copy_(sd_hf[k].t())
-            else:
-                # vanilla copy over the other parameters
-                assert sd_hf[k].shape == sd[k].shape
-                with torch.no_grad():
-                    sd[k].copy_(sd_hf[k])
+            # vanilla copy over the other parameters
+            new_k = rename_key(k)
+            # print(new_k, k)
+            assert sd_hf[k].shape == sd[new_k].shape
+            with torch.no_grad():
+                sd[new_k].copy_(sd_hf[k])
 
         return model
 
