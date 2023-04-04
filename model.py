@@ -210,12 +210,15 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, dense_in, targets=None):
+    def forward(self, idx, dense_in=None, targets=None):
         # TODO Alex: the model is not currently doing anything with padding, so attention masks are needed to prevent it from looking at padding tokens.
         # device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         # pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0) # shape (1, t)
+
+        if dense_in is None:
+            dense_in = torch.zeros((idx.shape[0], idx.shape[1], self.config.n_embd))
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) + dense_in # token embeddings of shape (b, t, n_embd)
@@ -408,7 +411,7 @@ class GPT(nn.Module):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
+            logits, _, _ = self(idx_cond)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options

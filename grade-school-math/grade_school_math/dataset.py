@@ -10,7 +10,7 @@ def read_jsonl(path: str):
 
 
 def get_examples(split):
-    path = os.path.join("data/", f"{split}.jsonl")
+    path = os.path.join("grade_school_math/data/", f"{split}.jsonl")
     examples = read_jsonl(path)
 
     for ex in examples:
