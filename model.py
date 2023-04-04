@@ -223,7 +223,6 @@ class GPT(nn.Module):
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) + dense_in # token embeddings of shape (b, t, n_embd)
 
-
         x = self.transformer.drop(tok_emb)
         for block in self.transformer.h:
             x = block(x)
@@ -236,7 +235,7 @@ class GPT(nn.Module):
             logits = self.lm_head(x)
             
             
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-100)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
