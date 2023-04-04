@@ -231,6 +231,8 @@ class GPT(nn.Module):
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
+            
+            
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
@@ -257,7 +259,7 @@ class GPT(nn.Module):
         from transformers import GPTNeoXForCausalLM
         print("loading weights from pretrained GPTNeoX: %s" % model_type)
         # init a huggingface/transformers model
-        model_hf = GPTNeoXForCausalLM.from_pretrained("EleutherAI/pythia-70m")
+        model_hf = GPTNeoXForCausalLM.from_pretrained(model_type)
         
         gpt_neox_config = model_hf.config
         
