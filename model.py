@@ -211,14 +211,13 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, dense_in=None, targets=None):
-        # TODO Alex: the model is not currently doing anything with padding, so attention masks are needed to prevent it from looking at padding tokens.
         # device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         # pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0) # shape (1, t)
 
         if dense_in is None:
-            dense_in = torch.zeros((idx.shape[0], idx.shape[1], self.config.n_embd))
+            dense_in = torch.zeros((idx.shape[0], idx.shape[1], self.config.n_embd)).to(idx.device)
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) + dense_in # token embeddings of shape (b, t, n_embd)
